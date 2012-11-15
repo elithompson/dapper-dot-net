@@ -9,6 +9,62 @@ namespace Dapper
 {
     public static partial class SqlMapper
     {
+        partial class GridReader
+        {
+            public async Task<IList<T>> ReadListAsync<T>()
+            {
+                return await Task.Run(
+                    async
+                    () =>
+                        {
+                            if (reader == null)
+                                throw new ObjectDisposedException(
+                                    GetType().FullName,
+                                    "The reader has been disposed; this can happen after all data has been consumed"
+                                    );
+                            if (consumed)
+                                throw new InvalidOperationException("Each grid can only be iterated once");
+
+                            var index = gridIndex;
+                            try
+                            {
+
+                                var typedIdentity = identity.ForGrid(typeof (T), gridIndex);
+                                var cache = GetCacheInfo(typedIdentity);
+                                var deserializer = cache.Deserializer;
+
+                                var hash = GetColumnHash(reader);
+                                if (deserializer.Func == null || deserializer.Hash != hash)
+                                {
+                                    deserializer = new DeserializerState(hash,
+                                                                        GetDeserializer(typeof (T), reader, 0,
+                                                                                        -1, false));
+                                    cache.Deserializer = deserializer;
+                                }
+                                consumed = true;
+
+                                IList<T> result = new List<T>();
+                                var dbDataReader = (DbDataReader) reader;
+                                while (index == gridIndex && await dbDataReader.ReadAsync())
+                                {
+                                    result.Add(
+                                        (T) deserializer.Func(reader)
+                                        );
+                                }
+                                return result;
+                            }
+                            finally // finally so that First etc progresses things even when multiple rows
+                            {
+                                if (index == gridIndex)
+                                {
+                                    NextResult();
+                                }
+                            }
+                        }
+                                );
+            }
+        }
+
             /// <summary>
             /// Query Async Multiple
             /// </summary>
