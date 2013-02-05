@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
@@ -329,6 +330,76 @@ namespace Dapper
             {
                 yield return (T)func(reader);
             }
+        }
+
+        private static Task<int> ExecuteCommandAsync(IDbConnection cnn, IDbTransaction transaction, string sql, Action<IDbCommand, object> paramReader, object obj, int? commandTimeout, CommandType? commandType)
+        {
+            DbCommand cmd = null;
+            bool wasClosed = cnn.State == ConnectionState.Closed;
+            try
+            {
+                cmd = (DbCommand)SetupCommand(cnn, transaction, sql, paramReader, obj, commandTimeout, commandType);
+                if (wasClosed) cnn.Open();
+                return cmd.ExecuteNonQueryAsync();
+            }
+            finally
+            {
+                if (wasClosed) cnn.Close();
+                if (cmd != null) cmd.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Execute parameterized SQL  
+        /// </summary>
+        /// <returns>Number of rows affected</returns>
+        public static async Task<int> ExecuteAsync(
+#if CSHARP30
+            this IDbConnection cnn, string sql, object param, IDbTransaction transaction, int? commandTimeout, CommandType? commandType
+#else
+this IDbConnection cnn, string sql, dynamic param = null, IDbTransaction transaction = null, int? commandTimeout = null, CommandType? commandType = null
+#endif
+)
+        {
+            IEnumerable multiExec = (object)param as IEnumerable;
+            Identity identity;
+            CacheInfo info = null;
+            if (multiExec != null && !(multiExec is string))
+            {
+                bool isFirst = true;
+                int total = 0;
+                using (var cmd = (DbCommand)SetupCommand(cnn, transaction, sql, null, null, commandTimeout, commandType))
+                {
+
+                    string masterSql = null;
+                    foreach (var obj in multiExec)
+                    {
+                        if (isFirst)
+                        {
+                            masterSql = cmd.CommandText;
+                            isFirst = false;
+                            identity = new Identity(sql, cmd.CommandType, cnn, null, obj.GetType(), null);
+                            info = GetCacheInfo(identity);
+                        }
+                        else
+                        {
+                            cmd.CommandText = masterSql; // because we do magic replaces on "in" etc
+                            cmd.Parameters.Clear(); // current code is Add-tastic
+                        }
+                        info.ParamReader(cmd, obj);
+                        total += await cmd.ExecuteNonQueryAsync();
+                    }
+                }
+                return total;
+            }
+
+            // nice and simple
+            if ((object)param != null)
+            {
+                identity = new Identity(sql, commandType, cnn, null, (object)param == null ? null : ((object)param).GetType(), null);
+                info = GetCacheInfo(identity);
+            }
+            return await ExecuteCommandAsync(cnn, transaction, sql, (object)param == null ? null : info.ParamReader, (object)param, commandTimeout, commandType);
         }
     }
 }
